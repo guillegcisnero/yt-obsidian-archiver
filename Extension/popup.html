@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>YT Archiver</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="title-row">
+        <h1>YT Obsidian Archiver</h1>
+        <span id="disk-badge" class="badge">Libre: -- GB</span>
+      </div>
+      <p id="video-title" class="video-title">Detectando video...</p>
+    </header>
+
+    <div id="disk-warning" class="alert hidden">
+      ⚠️ Espacio crítico en disco (menos de <span id="disk-threshold">5</span> GB libres).
+    </div>
+
+    <div class="form-group">
+      <label for="mode">Acción Principal</label>
+      <select id="mode">
+        <option value="md" selected>📝 Transcripción a Markdown (Obsidian)</option>
+        <option value="both">📦 Pack Curso (Transcripción .md + Video)</option>
+        <option value="video">🎬 Solo Video (Curso Largo MP4)</option>
+        <option value="audio">🎧 Solo Audio (M4A / Podcast)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="destination">Carpeta de Destino (Local / Sincronizada)</label>
+      <select id="destination">
+        <option value="obsidian" selected>💎 Bóveda de Obsidian</option>
+        <option value="gdrive">☁️ Carpeta Google Drive (PC)</option>
+        <option value="onedrive">☁️ Carpeta OneDrive (PC)</option>
+        <option value="local">💻 Descargas Locales</option>
+      </select>
+    </div>
+
+    <div class="format-row">
+      <div class="form-group">
+        <label for="video-format">Formato de Video</label>
+        <select id="video-format">
+          <option value="mp4" selected>MP4 (compatible)</option>
+          <option value="mkv">MKV (máxima calidad)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="audio-format">Formato de Audio</label>
+        <select id="audio-format">
+          <option value="m4a" selected>M4A (original)</option>
+          <option value="mp3">MP3 (universal)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="checkbox-group">
+      <input type="checkbox" id="split-chapters">
+      <label for="split-chapters">Dividir video por capítulos (si descarga video)</label>
+    </div>
+
+    <button id="send-btn" class="btn-primary">Enviar a la Cola</button>
+
+    <div class="queue-section">
+      <h2>Estado del Servidor y Cola (<span id="queue-count">0</span>)</h2>
+      <div id="active-task" class="task-card active-card">
+        Ninguna tarea procesándose.
+      </div>
+      <div id="last-task" class="task-card hidden"></div>
+      <ul id="queue-list" class="queue-list"></ul>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
