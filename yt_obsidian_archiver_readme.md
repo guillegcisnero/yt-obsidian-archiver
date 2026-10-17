@@ -1,6 +1,6 @@
 <div align="center">
   <!-- Reemplaza la ruta 'assets/banner.png' con el nombre del archivo de imagen que generes -->
-  <img src="assets/banner.png" alt="YT-Obsidian-Archiver Banner" width="100%">
+  <img src="assets/Gemini_Generated_Image_pxm92wpxm92wpxm9.jpeg" alt="YT-Obsidian-Archiver Banner" width="100%">
 
   # YT-Obsidian-Archiver
   
