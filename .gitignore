@@ -1,0 +1,10 @@
+# Configuración de tu entorno local
+.vscode/
+
+# Archivos temporales o basura del sistema operativo
+Thumbs.db
+.DS_Store
+
+# Si en el futuro instalas dependencias o usas Node.js
+node_modules/
+*.log
