@@ -9,3 +9,6 @@ fastapi>=0.110.0
 uvicorn>=0.29.0
 pydantic>=2.6.0
 yt-dlp>=2024.12.13
+# Fallback anti-429: extracción directa de transcripciones cuando yt-dlp recibe
+# HTTP 429 del endpoint timedtext de YouTube (subtítulos autotraducidos).
+youtube-transcript-api>=1.0.0

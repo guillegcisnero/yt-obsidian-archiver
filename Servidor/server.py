@@ -58,8 +58,9 @@ MIN_FREE_DISK_GB = float(os.environ.get("YT_MIN_FREE_DISK_GB", "5.0"))
 HOST = os.environ.get("YT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("YT_PORT", "8000"))
 # Navegador del que tomar cookies (chrome/firefox/edge) para saltar verificaciones de bot.
-# Vacío = desactivado. Ej.: YT_COOKIES_FROM_BROWSER=chrome
-COOKIES_BROWSER = os.environ.get("YT_COOKIES_FROM_BROWSER", "").strip().lower()
+# Por defecto "chrome" (Anti-403, §7.6) con fallback sin cookies si la SQLite está bloqueada.
+# Vacío = desactivado. Ej.: YT_COOKIES_FROM_BROWSER=
+COOKIES_BROWSER = os.environ.get("YT_COOKIES_FROM_BROWSER", "chrome").strip().lower()
 
 BASE_HOME = Path.home()
 
@@ -169,34 +170,109 @@ def sanitize_filename(name: str) -> str:
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean[:120] or "Curso_YouTube"
 
-# Orden de preferencia de idiomas para la transcripción (español primero, luego inglés)
-SUBTITLE_LANGUAGE_PRIORITY = (
-    "es", "es-419", "es-ES", "es-MX", "es-orig",
-    "en", "en-US", "en-GB", "en-orig",
-)
+def _is_native_track(tracks: list) -> bool:
+    """True si la pista tiene URLs y NINGUNA apunta al endpoint de auto-traducción (&tlang=).
+
+    Las pistas traducidas automáticamente (timedtext&tlang=xx) son las que YouTube responde
+    con HTTP 429 (Too Many Requests); las pistas nativas son peticiones directas y seguras.
+    """
+    if not tracks:
+        return False
+    return not any("tlang=" in (track.get("url") or "") for track in tracks)
 
 def pick_subtitle_language(info: dict) -> Optional[str]:
-    """Elige UN solo idioma de subtítulos (manual o automático).
+    """Elige UN SOLO idioma exacto de subtítulos (pedir dos idiomas a la vez dispara el 429).
 
-    Pedir varios idiomas a la vez (p. ej. "es.*") obliga a YouTube a servir decenas de
-    pistas autotraducidas y provoca errores HTTP 429 (Too Many Requests).
-    Prioridad: español (España/LatAm) → inglés → variantes → idioma original del video.
+    Prioridad estricta:
+      1) Español manual            -> subtitles["es" | "es-*"]
+      2) Inglés manual             -> subtitles["en" | "en-*"]
+      3) Español autogenerado NATIVO (sin &tlang=)  -> automatic_captions["es" | "es-*"]
+      4) Inglés autogenerado NATIVO (sin &tlang=)   -> automatic_captions["en" | "en-*"]
+      5) Último recurso: subtítulo manual en otro idioma (petición directa, sin &tlang=).
+    El idioma devuelto es el ÚNICO que se pasa a yt-dlp en "subtitleslangs".
     """
-    available = []
-    for source in ("subtitles", "automatic_captions"):
-        for lang in (info.get(source) or {}):
-            if lang not in available:
-                available.append(lang)
-    if not available:
-        return None
-    for lang in SUBTITLE_LANGUAGE_PRIORITY:
-        if lang in available:
-            return lang
-    for prefix in ("es", "en"):
-        for lang in available:
-            if lang.startswith(prefix):
+    manual = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+
+    def _find(store: dict, prefix: str, native_only: bool = False) -> Optional[str]:
+        candidates = ([prefix] if prefix in store else []) + sorted(
+            lang for lang in store if lang.startswith(prefix + "-")
+        )
+        for lang in candidates:
+            tracks = store.get(lang) or []
+            if native_only and not _is_native_track(tracks):
+                continue
+            if tracks:
                 return lang
-    return available[0]
+        return None
+
+    # 1-2) Subtítulos manuales: jamás usan el endpoint de auto-traducción.
+    for prefix in ("es", "en"):
+        found = _find(manual, prefix)
+        if found:
+            return found
+    # 3-4) Autogenerados SOLO si son nativos del video (URL sin &tlang=).
+    for prefix in ("es", "en"):
+        found = _find(auto, prefix, native_only=True)
+        if found:
+            return found
+    # 5) Último recurso: manual en otro idioma (petición directa, cero riesgo de 429).
+    for lang in sorted(manual):
+        if manual.get(lang):
+            return lang
+    return None
+
+def transcript_via_youtube_api(video_id: str, languages: list) -> Optional[list]:
+    """Fallback anti-429 infalible: transcripción vía youtube-transcript-api (API InnerTube).
+
+    No invoca el endpoint de auto-traducción timedtext&tlang= (causa del HTTP 429).
+    Soporta la API moderna (>=1.0: YouTubeTranscriptApi().fetch(...)) y la clásica
+    (YouTubeTranscriptApi.get_transcript(...)). Devuelve [(inicio_segundos, texto), ...]
+    o None si tampoco hay transcripción disponible.
+    """
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        print("[AVISO] youtube-transcript-api no está instalado; fallback anti-429 desactivado.")
+        return None
+
+    raw_segments = None
+    try:
+        fetched = YouTubeTranscriptApi().fetch(video_id, languages=languages)
+        raw_segments = [
+            {"start": getattr(snippet, "start", 0), "text": getattr(snippet, "text", "")}
+            for snippet in fetched
+        ]
+    except AttributeError:
+        # Versiones <=0.x no exponen .fetch(); se usa la API clásica de la propia librería.
+        try:
+            raw_segments = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+        except Exception as exc:
+            print(f"[AVISO] Fallback get_transcript falló ({exc.__class__.__name__}: {exc}).")
+            return None
+    except Exception as exc:
+        print(f"[AVISO] Fallback fetch falló ({exc.__class__.__name__}: {exc}).")
+        return None
+
+    segments = []
+    for item in raw_segments or []:
+        text = str(item.get("text", "")).replace("\n", " ").strip()
+        if text:
+            segments.append((float(item.get("start", 0) or 0), text))
+    return segments or None
+
+def write_segments_json3(segments: list, out_path: Path) -> None:
+    """Convierte [(inicio, texto), ...] al mismo formato .json3 que escribe yt-dlp.
+
+    El parser de Obsidian (build_obsidian_markdown) lee "events[].tStartMs" y "segs[].utf8",
+    por lo que la agrupación por capítulos/bloques de 5 minutos y el YAML Frontmatter
+    funcionan idéntico venga de dó venga el .json3.
+    """
+    events = [
+        {"tStartMs": int(start_sec * 1000), "segs": [{"utf8": text}]}
+        for start_sec, text in segments
+    ]
+    out_path.write_text(json.dumps({"events": events}, ensure_ascii=False), encoding="utf-8")
 
 def get_free_space_gb(folder: Path) -> float:
     total, used, free = shutil.disk_usage(folder)
@@ -214,10 +290,91 @@ def yaml_escape(value) -> str:
     return re.sub(r"[\r\n]+", " ", text).strip()
 
 def apply_cookies(opts: dict) -> dict:
-    """Añade --cookies-from-browser si YT_COOKIES_FROM_BROWSER está definido (evasión de bloqueos)."""
+    """Añade --cookies-from-browser (por defecto Chrome) para evadir verificaciones de bot (§7.6)."""
     if COOKIES_BROWSER:
         opts["cookiesfrombrowser"] = (COOKIES_BROWSER,)
     return opts
+
+def run_ydl(opts: dict, url: str, mode: str = "info"):
+    """Ejecuta yt-dlp aplicando el protocolo Anti-Bot resiliente (§7.6).
+
+    Primer intento con cookiesfrombrowser; si falla (Chrome en Windows mantiene
+    bloqueada la base SQLite de cookies mientras está abierto), reintenta
+    automáticamente SIN cookies y con extractor_args youtube.player_client
+    ["android", "web"] para esquivar el HTTP 403 Forbidden de los streams.
+    mode: "info" (metadatos), "subtitles" (descarga de subtítulos) o "media" (descarga).
+    """
+    def _execute(active_opts: dict):
+        with yt_dlp.YoutubeDL(active_opts) as ydl:
+            if mode == "media":
+                ydl.download([url])
+                return None
+            return ydl.extract_info(url, download=(mode == "subtitles"))
+
+    try:
+        return _execute(opts)
+    except Exception as first_error:
+        if "cookiesfrombrowser" not in opts:
+            raise
+        print(f"[AVISO] Cookies de navegador rechazadas ({first_error.__class__.__name__}); reintento SIN cookies.")
+        fallback_opts = {k: v for k, v in opts.items() if k != "cookiesfrombrowser"}
+        fallback_opts.setdefault("extractor_args", {"youtube": {"player_client": ["android", "web"]}})
+        return _execute(fallback_opts)
+
+def acquire_subtitle_file(url: str, info: dict, temp_dir: Path, chosen_lang: Optional[str]) -> Optional[Path]:
+    """Intento primario (yt-dlp con UN ÚNICO idioma) + fallback infalible anti-429.
+
+    - yt-dlp recibe exactamente UN idioma exacto y los clientes android/ios/web desde el
+      primer intento (esquivan el rate-limit del cliente web en timedtext).
+    - Si yt-dlp lanza excepción (p. ej. HTTP 429) o no escribe el .json3, la tarea NO se
+      aborta: se extrae la transcripción vía youtube-transcript-api y se convierte al mismo
+      formato .json3 que espera el parser de Obsidian.
+    Devuelve la ruta del .json3 o None si el video no tiene transcripción utilizable.
+    """
+    sub_file = None
+    if chosen_lang:
+        ydl_sub_opts = apply_cookies({
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            # Anti-429: UN SOLO idioma exacto elegido por pick_subtitle_language();
+            # nunca dos idiomas a la vez (dispararía el endpoint de auto-traducción &tlang=).
+            "subtitleslangs": [chosen_lang],
+            "subtitlesformat": "json3",
+            # Anti-429: clientes de reproducción android/ios/web evitan el rate-limit del
+            # cliente web en el endpoint timedtext de subtítulos.
+            "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+            # Anti-429 (§4.P1): pausas obligatorias entre peticiones y entre subtítulos
+            "sleep_interval_requests": 1,
+            "sleep_interval_subtitles": 2,
+            "outtmpl": str(temp_dir / "temp_sub"),
+            "noplaylist": True,
+            "quiet": True,
+        })
+        try:
+            run_ydl(ydl_sub_opts, url, mode="subtitles")
+            sub_candidates = sorted(temp_dir.glob("temp_sub*.json3"))
+            sub_file = sub_candidates[0] if sub_candidates else None
+        except Exception as exc:
+            print(f"[AVISO] yt-dlp no pudo descargar subtítulos ({exc.__class__.__name__}: {exc}); activo fallback API.")
+            sub_file = None
+
+    if sub_file is None:
+        video_id = str(info.get("id") or "")
+        if not video_id:
+            return None
+        if current_task_view is not None:
+            current_task_view["progress"] = "yt-dlp sin transcripción; usando API de respaldo (anti-429)..."
+        # Idioma elegido primero y luego los habituales (es/en), sin duplicados.
+        languages: list = []
+        for lang in (chosen_lang, "es", "en"):
+            if lang and lang not in languages:
+                languages.append(lang)
+        segments = transcript_via_youtube_api(video_id, languages)
+        if segments:
+            sub_file = temp_dir / "temp_sub_api_fallback.json3"
+            write_segments_json3(segments, sub_file)
+    return sub_file
 
 # ================= CONVERSOR DE SUBTÍTULOS A MARKDOWN (OBSIDIAN) =================
 def build_obsidian_markdown(info: dict, sub_path: Optional[Path], output_md: Path):
@@ -341,8 +498,7 @@ def process_item_sync(task: TaskRequest) -> dict:
     # 0. Metadatos del video (título canónico, capítulos y subtítulos disponibles)
     current_task_view["progress"] = "Obteniendo información del video..."
     ydl_info_opts = apply_cookies({"skip_download": True, "noplaylist": True, "quiet": True})
-    with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
-        info = ydl.extract_info(task.url, download=False)
+    info = run_ydl(ydl_info_opts, task.url, mode="info")
     safe_title = sanitize_filename(info.get("title") or task.title)
     detail_parts = []
 
@@ -358,22 +514,9 @@ def process_item_sync(task: TaskRequest) -> dict:
         # Los subtítulos temporales van a una carpeta temporal del sistema para no ensuciar la bóveda.
         temp_dir = Path(tempfile.mkdtemp(prefix="yt_archiver_sub_"))
         try:
-            sub_file = None
-            if chosen_lang:
-                ydl_sub_opts = apply_cookies({
-                    "skip_download": True,
-                    "writesubtitles": True,
-                    "writeautomaticsub": True,
-                    "subtitleslangs": [chosen_lang],
-                    "subtitlesformat": "json3",
-                    "outtmpl": str(temp_dir / "temp_sub"),
-                    "noplaylist": True,
-                    "quiet": True,
-                })
-                with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
-                    ydl.extract_info(task.url, download=True)
-                sub_candidates = sorted(temp_dir.glob("temp_sub*.json3"))
-                sub_file = sub_candidates[0] if sub_candidates else None
+            # Intento primario yt-dlp (un solo idioma, anti-429) + fallback infalible
+            # con youtube-transcript-api si falla la descarga (p. ej. HTTP 429).
+            sub_file = acquire_subtitle_file(task.url, info, temp_dir, chosen_lang)
             build_obsidian_markdown(info, sub_file, vault_dir / f"{safe_title}.md")
             detail_parts.append(f"📝 {vault_dir}")
         finally:
@@ -390,6 +533,13 @@ def process_item_sync(task: TaskRequest) -> dict:
             "continuedl": True,
             "retries": 10,
             "fragment_retries": 10,
+            # Anti-403 (§4.P2): sin verificación de certificado y SIN caché de yt-dlp
+            # (la caché conserva firmas n-sig/POT caducadas que YouTube rechaza con 403).
+            "nocheckcertificate": True,
+            "cachedir": False,
+            # Anti-403 (§4.P2): clientes de reproducción "android" y "web" evitan el
+            # bloqueo Forbidden a los streams de googlevideo.
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "noplaylist": True,
             "progress_hooks": [progress_hook],
             "quiet": True,
@@ -419,8 +569,7 @@ def process_item_sync(task: TaskRequest) -> dict:
         if postprocessors:
             ydl_media_opts["postprocessors"] = postprocessors
 
-        with yt_dlp.YoutubeDL(ydl_media_opts) as ydl:
-            ydl.download([task.url])
+        run_ydl(ydl_media_opts, task.url, mode="media")
         detail_parts.append(f"🎬 {media_dir}")
         current_task_view["progress"] = "Descarga de medios completada."
 
