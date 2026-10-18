@@ -22,6 +22,7 @@ El objetivo principal es agilizar la ingesta de información valiosa hacia siste
 - **Extracción de Transcripciones:** Obtiene el texto completo de los subtítulos de los videos de YouTube.
 - **Captura de Metadatos:** Recopila información clave como el título, autor y enlace del video.
 - **Generación a Markdown:** Formatea automáticamente el contenido extraído en un archivo `.md` listo para usar.
+- **Destinos configurables:** Elige por separado la carpeta de tu bóveda de Obsidian (para los `.md`) y la carpeta de descargas de video/audio (los videos nunca se guardan en la bóveda).
 - **Integración fluida:** Pensado específicamente para la estructura de bóvedas de Obsidian y cuadernos de Google NotebookLM.
 
 ## 🛠️ Tecnologías

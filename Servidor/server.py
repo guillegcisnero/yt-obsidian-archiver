@@ -3,6 +3,7 @@ import re
 import json
 import shutil
 import asyncio
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,37 @@ DESTINATIONS = {
 for folder in DESTINATIONS.values():
     folder.mkdir(parents=True, exist_ok=True)
 
+# Valores por defecto cuando la extensión no envía una ruta propia:
+#  - Bóveda (para los .md)  -> YT_DEST_OBSIDIAN
+#  - Medios (video/audio)   -> YT_DEST_LOCAL (los videos nunca van a la bóveda)
+DEFAULT_VAULT = DESTINATIONS["obsidian"]
+DEFAULT_MEDIA = DESTINATIONS["local"]
+
+def resolve_user_path(raw_value: Optional[str], default: Path) -> Path:
+    """Resuelve una carpeta indicada por el usuario desde la extensión.
+
+    - Vacío => usa la carpeta por defecto del servidor.
+    - Admite ~ y exige una ruta absoluta; se crea si no existe (idempotente).
+    """
+    if not raw_value or not raw_value.strip():
+        return default
+    expanded = Path(os.path.expanduser(raw_value.strip()))
+    if not expanded.is_absolute():
+        raise ValueError("La ruta debe ser absoluta (ej: C:\\Users\\TuUsuario\\MiBoveda).")
+    try:
+        expanded.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"No se pudo crear la carpeta indicada: {exc}")
+    return expanded
+
+def resolve_vault_path(vault_path: Optional[str] = None) -> Path:
+    """Carpeta de la bóveda de Obsidian donde se escriben los archivos .md."""
+    return resolve_user_path(vault_path, DEFAULT_VAULT)
+
+def resolve_media_path(media_path: Optional[str] = None) -> Path:
+    """Carpeta donde se descargan los videos/audios (nunca dentro de la bóveda)."""
+    return resolve_user_path(media_path, DEFAULT_MEDIA)
+
 # Regex estricta para validar solo URLs de YouTube.
 # Acepta: youtube.com/watch | /shorts | /embed | /live | /v y youtu.be (con subdominios m. y music.)
 YT_REGEX = re.compile(
@@ -99,7 +131,9 @@ class TaskRequest(BaseModel):
     url: str
     title: str
     mode: Literal["md", "both", "video", "audio"]
-    destination: Literal["obsidian", "gdrive", "onedrive", "local"]
+    # Rutas elegidas por el usuario en la extensión (vacío => valor por defecto del servidor).
+    vault_path: Optional[str] = None  # carpeta de la bóveda de Obsidian (solo .md)
+    media_path: Optional[str] = None  # carpeta de descargas de video/audio
     split_chapters: bool = False
     video_format: Literal["mp4", "mkv"] = "mp4"
     audio_format: Literal["m4a", "mp3"] = "m4a"
@@ -266,10 +300,14 @@ def build_obsidian_markdown(info: dict, sub_path: Optional[Path], output_md: Pat
         f.write("\n".join(lines))
 
 # ================= MOTOR DE PROCESAMIENTO (YT-DLP) =================
-def process_item_sync(task: TaskRequest) -> str:
-    """Ejecuta la tarea completa. Devuelve el título canónico con el que se creó la carpeta."""
+def process_item_sync(task: TaskRequest) -> dict:
+    """Ejecuta la tarea completa.
+
+    El .md se escribe SIEMPRE en la bóveda elegida; los medios (video/audio) se descargan
+    SIEMPRE en la carpeta de descargas elegida, NUNCA dentro de la bóveda.
+    Devuelve {"title": str, "detail": str} para el panel de estado del popup.
+    """
     global current_task_view
-    target_dir = DESTINATIONS.get(task.destination, DESTINATIONS["obsidian"])
 
     def progress_hook(d):
         if current_task_view is None:
@@ -281,21 +319,25 @@ def process_item_sync(task: TaskRequest) -> str:
         elif d["status"] == "finished":
             current_task_view["progress"] = "Procesando y empaquetando archivo..."
 
-    # 1. Transcripción a Markdown: descarga subtítulos sin bajar el video
+    # 0. Metadatos del video (título canónico, capítulos y subtítulos disponibles)
+    current_task_view["progress"] = "Obteniendo información del video..."
+    ydl_info_opts = apply_cookies({"skip_download": True, "noplaylist": True, "quiet": True})
+    with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
+        info = ydl.extract_info(task.url, download=False)
+    safe_title = sanitize_filename(info.get("title") or task.title)
+    detail_parts = []
+
+    # 1. Transcripción a Markdown -> SIEMPRE a la bóveda (plano, sin subcarpetas)
     if task.mode in ("md", "both"):
+        vault_dir = resolve_vault_path(task.vault_path)
         current_task_view["progress"] = "Analizando subtítulos y capítulos..."
-        ydl_info_opts = apply_cookies({"skip_download": True, "noplaylist": True, "quiet": True})
-        with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
-            info = ydl.extract_info(task.url, download=False)
-        # Título canónico de YouTube: carpeta y .md siempre llevan el mismo nombre
-        safe_title = sanitize_filename(info.get("title") or task.title)
-        course_folder = target_dir / safe_title
-        course_folder.mkdir(parents=True, exist_ok=True)
         chosen_lang = pick_subtitle_language(info)
         if chosen_lang:
             current_task_view["progress"] = f"Descargando subtítulos ({chosen_lang})..."
         else:
             current_task_view["progress"] = "El video no tiene subtítulos; se generará el .md igualmente."
+        # Los subtítulos temporales van a una carpeta temporal del sistema para no ensuciar la bóveda.
+        temp_dir = Path(tempfile.mkdtemp(prefix="yt_archiver_sub_"))
         try:
             sub_file = None
             if chosen_lang:
@@ -305,32 +347,23 @@ def process_item_sync(task: TaskRequest) -> str:
                     "writeautomaticsub": True,
                     "subtitleslangs": [chosen_lang],
                     "subtitlesformat": "json3",
-                    "outtmpl": str(target_dir / "temp_sub"),
+                    "outtmpl": str(temp_dir / "temp_sub"),
                     "noplaylist": True,
                     "quiet": True,
                 })
                 with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
                     ydl.extract_info(task.url, download=True)
-                sub_candidates = sorted(target_dir.glob("temp_sub*.json3"))
+                sub_candidates = sorted(temp_dir.glob("temp_sub*.json3"))
                 sub_file = sub_candidates[0] if sub_candidates else None
-            build_obsidian_markdown(info, sub_file, course_folder / f"{safe_title}.md")
-            current_task_view["progress"] = "Transcripción .md generada para Obsidian."
+            build_obsidian_markdown(info, sub_file, vault_dir / f"{safe_title}.md")
+            detail_parts.append(f"📝 {vault_dir}")
         finally:
-            # Limpieza idempotente de subtítulos temporales (aunque la tarea falle)
-            for temp_sub in target_dir.glob("temp_sub*.json3"):
-                temp_sub.unlink(missing_ok=True)
-    else:
-        # Solo Video/Audio: resolvemos el título real antes de crear la carpeta
-        current_task_view["progress"] = "Obteniendo información del video..."
-        ydl_meta_opts = apply_cookies({"skip_download": True, "noplaylist": True, "quiet": True})
-        with yt_dlp.YoutubeDL(ydl_meta_opts) as ydl:
-            info = ydl.extract_info(task.url, download=False)
-        safe_title = sanitize_filename(info.get("title") or task.title)
-        course_folder = target_dir / safe_title
-        course_folder.mkdir(parents=True, exist_ok=True)
+            # Limpieza idempotente (aunque la tarea falle)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
-    # 2. Descarga de Video / Audio ("video", "audio", "both")
+    # 2. Descarga de Video / Audio -> SIEMPRE a la carpeta de descargas elegida
     if task.mode in ("video", "audio", "both"):
+        media_dir = resolve_media_path(task.media_path)
         current_task_view["progress"] = "Preparando descarga de medios..."
         # "%%" protege los porcentajes literales dentro del template de yt-dlp
         outtmpl_title = safe_title.replace("%", "%%")
@@ -358,20 +391,21 @@ def process_item_sync(task: TaskRequest) -> str:
         if task.split_chapters:
             postprocessors.append({"key": "FFmpegSplitChapters"})
             ydl_media_opts["outtmpl"] = {
-                "default": str(course_folder / f"{outtmpl_title}.%(ext)s"),
-                "chapter": str(course_folder / "%(section_number)02d - %(section_title)s.%(ext)s"),
+                "default": str(media_dir / f"{outtmpl_title}.%(ext)s"),
+                "chapter": str(media_dir / "%(section_number)02d - %(section_title)s.%(ext)s"),
             }
         else:
-            ydl_media_opts["outtmpl"] = str(course_folder / f"{outtmpl_title}.%(ext)s")
+            ydl_media_opts["outtmpl"] = str(media_dir / f"{outtmpl_title}.%(ext)s")
 
         if postprocessors:
             ydl_media_opts["postprocessors"] = postprocessors
 
         with yt_dlp.YoutubeDL(ydl_media_opts) as ydl:
             ydl.download([task.url])
+        detail_parts.append(f"🎬 {media_dir}")
         current_task_view["progress"] = "Descarga de medios completada."
 
-    return safe_title
+    return {"title": safe_title, "detail": " · ".join(detail_parts)}
 
 async def worker_loop():
     global current_task_view, last_task_view
@@ -385,12 +419,12 @@ async def worker_loop():
             "progress": "Iniciando..."
         }
         try:
-            finished_title = await asyncio.to_thread(process_item_sync, task)
+            result = await asyncio.to_thread(process_item_sync, task)
             last_task_view = {
-                "title": finished_title,
+                "title": result["title"],
                 "mode": task.mode,
                 "status": "done",
-                "detail": "Tarea completada correctamente."
+                "detail": f"Guardado en: {result['detail']}"
             }
         except Exception as e:
             detail = re.sub(r"\s+", " ", str(e)).strip()[:300] or e.__class__.__name__
@@ -411,18 +445,30 @@ async def enqueue_task(req: TaskRequest):
     if not YT_REGEX.match(req.url):
         raise HTTPException(status_code=400, detail="URL inválida. Solo se permiten enlaces de YouTube.")
 
-    target_dir = DESTINATIONS.get(req.destination, DESTINATIONS["obsidian"])
-    free_gb = get_free_space_gb(target_dir)
+    # Validar las rutas que usará la tarea antes de encolarla (falla rápido con mensaje claro).
+    try:
+        if req.mode in ("md", "both"):
+            resolve_vault_path(req.vault_path)
+        if req.mode in ("video", "audio", "both"):
+            media_dir = resolve_media_path(req.media_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    if req.mode in ("video", "both") and free_gb < MIN_FREE_DISK_GB:
-        raise HTTPException(
-            status_code=507,
-            detail=f"Espacio insuficiente ({free_gb} GB libres). Se requieren al menos {MIN_FREE_DISK_GB} GB para descargar videos largos."
-        )
+    if req.mode in ("video", "both"):
+        free_gb = get_free_space_gb(media_dir)
+        if free_gb < MIN_FREE_DISK_GB:
+            raise HTTPException(
+                status_code=507,
+                detail=f"Espacio insuficiente ({free_gb} GB libres). Se requieren al menos {MIN_FREE_DISK_GB} GB para descargar videos largos."
+            )
 
     pending_tasks_view.append({"title": req.title, "mode": req.mode})
     await task_queue.put(req)
     return {"status": "queued", "queue_position": len(pending_tasks_view)}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 @app.get("/status", dependencies=[Depends(require_token)])
 async def get_status():

@@ -30,13 +30,15 @@
     </div>
 
     <div class="form-group">
-      <label for="destination">Carpeta de Destino (Local / Sincronizada)</label>
-      <select id="destination">
-        <option value="obsidian" selected>💎 Bóveda de Obsidian</option>
-        <option value="gdrive">☁️ Carpeta Google Drive (PC)</option>
-        <option value="onedrive">☁️ Carpeta OneDrive (PC)</option>
-        <option value="local">💻 Descargas Locales</option>
-      </select>
+      <label for="vault-path">📝 Bóveda de Obsidian (destino de los .md)</label>
+      <input type="text" id="vault-path" placeholder="C:\Users\Guille\Documents\MiBoveda">
+      <p class="hint">Los .md se guardan directamente aquí, sin subcarpetas.</p>
+    </div>
+
+    <div class="form-group">
+      <label for="media-path">🎬 Carpeta para Video/Audio (descargas)</label>
+      <input type="text" id="media-path" placeholder="C:\Users\Guille\Downloads\Cursos">
+      <p class="hint">Los videos/audios se guardan aquí, nunca dentro de la bóveda.</p>
     </div>
 
     <div class="format-row">

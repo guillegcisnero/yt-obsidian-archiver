@@ -29,12 +29,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 2. Restaurar y persistir las preferencias del usuario (permiso "storage")
   const PREFERENCE_FIELDS = {
     mode: "mode",
-    destination: "destination",
     videoFormat: "video-format",
     audioFormat: "audio-format"
   };
   const savedPrefs = await chrome.storage.local.get(
-    ["mode", "destination", "videoFormat", "audioFormat", "splitChapters"]
+    ["mode", "videoFormat", "audioFormat", "splitChapters", "vaultPath", "mediaPath"]
   );
   Object.entries(PREFERENCE_FIELDS).forEach(([key, elementId]) => {
     const select = document.getElementById(elementId);
@@ -48,13 +47,27 @@ document.addEventListener("DOMContentLoaded", async () => {
   splitBox.checked = Boolean(savedPrefs.splitChapters);
   splitBox.addEventListener("change", () => chrome.storage.local.set({ splitChapters: splitBox.checked }));
 
+  // 2b. Dos rutas independientes: bóveda (.md) y descargas de video/audio.
+  //     Vacío => se usa la carpeta por defecto configurada en el .env del servidor.
+  const vaultInput = document.getElementById("vault-path");
+  const mediaInput = document.getElementById("media-path");
+  vaultInput.value = savedPrefs.vaultPath || "";
+  mediaInput.value = savedPrefs.mediaPath || "";
+  vaultInput.addEventListener("input", () =>
+    chrome.storage.local.set({ vaultPath: vaultInput.value.trim() })
+  );
+  mediaInput.addEventListener("input", () =>
+    chrome.storage.local.set({ mediaPath: mediaInput.value.trim() })
+  );
+
   // 3. Enviar tarea al servidor local
   sendBtn.addEventListener("click", async () => {
     const mode = document.getElementById("mode").value;
-    const destination = document.getElementById("destination").value;
     const splitChapters = document.getElementById("split-chapters").checked;
     const videoFormat = document.getElementById("video-format").value;
     const audioFormat = document.getElementById("audio-format").value;
+    const vaultPath = vaultInput.value.trim();
+    const mediaPath = mediaInput.value.trim();
 
     sendBtn.disabled = true;
     sendBtn.textContent = "Añadiendo a la cola...";
@@ -70,7 +83,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           url: currentUrl,
           title: currentTitle,
           mode: mode,
-          destination: destination,
+          vault_path: vaultPath || null,
+          media_path: mediaPath || null,
           split_chapters: splitChapters,
           video_format: videoFormat,
           audio_format: audioFormat
