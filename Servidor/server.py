@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import json
 import shutil
 import asyncio
@@ -12,6 +13,17 @@ from fastapi import Depends, FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import yt_dlp
+
+# ================= SOPORTE DE EJECUCIÓN EMPAQUETADA (.exe) =================
+# En el ejecutable --noconsole de PyInstaller, sys.stdout/sys.stderr son None y el logging
+# de Uvicorn (que escribe en ellos) haría fallar el arranque de forma silenciosa. Los
+# redirigimos a un archivo de log junto al .exe: el servidor queda oculto y deja rastro.
+if getattr(sys, "frozen", False) and (sys.stdout is None or sys.stderr is None):
+    _log_stream = open(Path(sys.executable).resolve().parent / "server.log", "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = _log_stream
+    if sys.stderr is None:
+        sys.stderr = _log_stream
 
 # ================= CARGA DE VARIABLES DE ENTORNO (.env) =================
 def load_env_file(path: Path):
@@ -29,9 +41,15 @@ def load_env_file(path: Path):
         if key:
             os.environ.setdefault(key, value)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Directorio de referencia: en un .exe de PyInstaller, __file__ vive en una carpeta temporal,
+# así que usamos la carpeta real del ejecutable para poder leer su archivo .env.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
 load_env_file(PROJECT_ROOT / ".env")
-load_env_file(Path(__file__).resolve().parent / ".env")
+load_env_file(BASE_DIR / ".env")
 
 # ================= CONFIGURACIÓN DE SEGURIDAD Y RUTAS =================
 SECRET_TOKEN = os.environ.get("YT_AUTH_TOKEN", "MI_CLAVE_SECRETA_BLINDADA_2026")
@@ -487,8 +505,11 @@ async def get_status():
     }
 
 if __name__ == "__main__":
+    import multiprocessing
     import uvicorn
     # 127.0.0.1 (por defecto) blinda el servidor para que nadie en tu red Wi-Fi pueda acceder
     if HOST not in ("127.0.0.1", "localhost", "::1"):
         print(f"[AVISO DE SEGURIDAD] Estás exponiendo el servidor en '{HOST}'. Usa 127.0.0.1 para blindarlo.")
+    # Crítico en Windows al empaquetar con PyInstaller: evita el bucle infinito de re-ejecución.
+    multiprocessing.freeze_support()
     uvicorn.run(app, host=HOST, port=PORT)
