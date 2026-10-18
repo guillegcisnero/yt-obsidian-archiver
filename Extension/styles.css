@@ -161,6 +161,30 @@ input[type="text"]:focus {
   cursor: not-allowed;
 }
 
+.btn-danger {
+  width: 100%;
+  background: var(--danger);
+  color: white;
+  border: none;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  margin-top: 14px;
+}
+
+.btn-danger:hover {
+  background: #DC2626;
+}
+
+.btn-danger:disabled {
+  background: var(--border);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
 .queue-section {
   margin-top: 16px;
   border-top: 1px solid var(--border);

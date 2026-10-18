@@ -107,7 +107,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // 4. Actualizar cola, última tarea y espacio en disco cada 2 segundos
+  // 4. Apagar el servidor local desde la interfaz (POST /shutdown con token)
+  const shutdownBtn = document.getElementById("shutdown-btn");
+  shutdownBtn.addEventListener("click", async () => {
+    shutdownBtn.disabled = true;
+    shutdownBtn.textContent = "Apagando servidor...";
+    try {
+      const res = await fetch(`${API_URL}/shutdown`, {
+        method: "POST",
+        headers: { "X-Auth-Token": AUTH_TOKEN }
+      });
+      if (!res.ok) {
+        throw new Error("El servidor rechazó la orden de apagado.");
+      }
+      shutdownBtn.textContent = "Servidor Apagado";
+      shutdownBtn.disabled = true;
+      alert("El servidor local se cerró correctamente. Vuelve a ejecutarlo cuando necesites enviar nuevas descargas.");
+    } catch (error) {
+      shutdownBtn.disabled = false;
+      shutdownBtn.textContent = "Apagar Servidor Local";
+      alert("No se pudo apagar el servidor local (127.0.0.1:8000). Asegúrate de que esté encendido.");
+    }
+  });
+
+  // 5. Actualizar cola, última tarea y espacio en disco cada 2 segundos
   updateStatus();
   setInterval(updateStatus, 2000);
 });

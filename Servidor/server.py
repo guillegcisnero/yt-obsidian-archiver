@@ -1,5 +1,6 @@
 import os
 import re
+import signal
 import sys
 import json
 import shutil
@@ -9,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
-from fastapi import Depends, FastAPI, HTTPException, Header
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import yt_dlp
@@ -502,6 +503,23 @@ async def get_status():
         "free_space_gb": free_gb,
         "min_free_disk_gb": MIN_FREE_DISK_GB,
         "low_disk_warning": free_gb < MIN_FREE_DISK_GB
+    }
+
+def request_shutdown():
+    """Envía la señal de apagado al propio proceso para terminar Uvicorn."""
+    os.kill(os.getpid(), signal.SIGTERM)
+
+@app.post("/shutdown", dependencies=[Depends(require_token)])
+async def shutdown_server(background_tasks: BackgroundTasks):
+    """Apaga el servidor local desde la extensión.
+
+    Protegido por X-Auth-Token (HTTP 403 si no coincide). La señal se lanza como
+    tarea en segundo plano para que el cliente reciba ANTES el JSON de confirmación.
+    """
+    background_tasks.add_task(request_shutdown)
+    return {
+        "status": "shutting_down",
+        "message": "Apagado confirmado: el servidor local se cerrará en unos segundos."
     }
 
 if __name__ == "__main__":
